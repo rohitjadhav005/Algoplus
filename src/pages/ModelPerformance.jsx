@@ -3,7 +3,7 @@ import { useAppContext } from '../context/AppContext';
 import FileUpload from '../components/ui/FileUpload';
 import { parseJSON } from '../utils/dataParser';
 import {
-  buildConfusionMatrix, computeClassificationMetrics,
+  buildConfusionMatrixAndMetrics,
   computeROC, computePRCurve, computeRegressionMetrics
 } from '../utils/mlMetrics';
 import {
@@ -18,6 +18,8 @@ export default function ModelPerformance() {
   const [activeModelIdx, setActiveModelIdx] = useState(0);
   const [activeTab, setActiveTab] = useState('metrics');
   const [error, setError] = useState(null);
+  // Computed metrics are stored in state (fetched async from Python backend)
+  const [computedMetrics, setComputedMetrics] = useState({});
 
   const handleFile = useCallback(async (file) => {
     setLoading(true);
@@ -25,8 +27,36 @@ export default function ModelPerformance() {
     try {
       const data = await parseJSON(file);
       if (!data.y_true || !data.y_pred) throw new Error('JSON must contain y_true and y_pred arrays');
-      dispatch({ type: 'ADD_MODEL_RESULT', payload: { ...data, fileName: file.name, name: data.name || file.name } });
-      setActiveModelIdx(state.modelResults.length);
+
+      const modelEntry = { ...data, fileName: file.name, name: data.name || file.name };
+      const newIdx = state.modelResults.length;
+
+      // Compute all metrics from the Python backend
+      let metrics = {};
+      const isClassification = !data.type || data.type === 'classification';
+
+      if (isClassification) {
+        // Single call returns: labels, matrix, perClass, accuracy, macroPrecision, macroRecall, macroF1
+        const result = await buildConfusionMatrixAndMetrics(data.y_true, data.y_pred);
+        metrics.classMetrics = result;
+        metrics.confMatrix = { matrix: result.matrix, labels: result.labels };
+
+        if (data.y_prob && result.labels.length === 2) {
+          const posLabel = data.positive_label || result.labels[1];
+          metrics.rocData = await computeROC(data.y_true, data.y_prob, posLabel);
+          metrics.prData = await computePRCurve(data.y_true, data.y_prob, posLabel);
+        }
+      } else {
+        metrics.regMetrics = await computeRegressionMetrics(
+          data.y_true.map(Number),
+          data.y_pred.map(Number)
+        );
+      }
+
+      dispatch({ type: 'ADD_MODEL_RESULT', payload: modelEntry });
+      setComputedMetrics((prev) => ({ ...prev, [newIdx]: metrics }));
+      setActiveModelIdx(newIdx);
+      setActiveTab('metrics');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -75,23 +105,13 @@ export default function ModelPerformance() {
   const model = state.modelResults[activeModelIdx] || state.modelResults[0];
   const isClassification = !model.type || model.type === 'classification';
 
-  let classMetrics = null, confMatrix = null, rocData = null, prData = null, regMetrics = null;
-
-  if (isClassification) {
-    const { matrix, labels } = buildConfusionMatrix(model.y_true, model.y_pred);
-    confMatrix = { matrix, labels };
-    classMetrics = computeClassificationMetrics(model.y_true, model.y_pred, labels);
-    if (model.y_prob && labels.length === 2) {
-      const posLabel = model.positive_label || labels[1];
-      rocData = computeROC(model.y_true, model.y_prob, posLabel);
-      prData = computePRCurve(model.y_true, model.y_prob, posLabel);
-    }
-  } else {
-    regMetrics = computeRegressionMetrics(
-      model.y_true.map(Number),
-      model.y_pred.map(Number)
-    );
-  }
+  // Pull pre-computed metrics from state (populated in handleFile)
+  const m = computedMetrics[activeModelIdx] || {};
+  const classMetrics = m.classMetrics || null;
+  const confMatrix = m.confMatrix || null;
+  const rocData = m.rocData || null;
+  const prData = m.prData || null;
+  const regMetrics = m.regMetrics || null;
 
   const maxCell = confMatrix ? Math.max(...confMatrix.matrix.flat()) : 1;
 

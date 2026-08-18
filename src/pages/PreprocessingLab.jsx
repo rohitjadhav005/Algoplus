@@ -22,6 +22,9 @@ export default function PreprocessingLab() {
   const [selectedTransform, setSelectedTransform] = useState('normalize');
   const [transformedRows, setTransformedRows] = useState(null);
   const [transformedCol, setTransformedCol] = useState('');
+  const [applying, setApplying] = useState(false);
+  const [beforeData, setBeforeData] = useState([]);
+  const [afterData, setAfterData] = useState([]);
 
   if (!dataset) {
     return (
@@ -41,19 +44,34 @@ export default function PreprocessingLab() {
   const col = selectedCol || numericCols[0] || '';
   const transformInfo = TRANSFORMS.find((t) => t.value === selectedTransform);
 
-  const handleApply = () => {
+  // Fetch before-histogram from Python backend when column changes
+  React.useEffect(() => {
+    if (!col || !rows) return;
+    getHistogramData(rows, col).then(setBeforeData).catch(() => setBeforeData([]));
+  }, [col, rows]);
+
+  const handleApply = async () => {
     if (!col) return;
-    const newRows = applyTransformToDataset(rows, col, selectedTransform);
-    setTransformedRows(newRows);
-    setTransformedCol(`${col}_${selectedTransform}`);
+    setApplying(true);
+    try {
+      const result = await applyTransformToDataset(rows, col, selectedTransform);
+      const newRows = result.rows;
+      const newCol = result.newColumn;
+      setTransformedRows(newRows);
+      setTransformedCol(newCol);
+      // Fetch after-histogram from Python backend (only for non-bin transforms)
+      if (selectedTransform !== 'bin') {
+        const after = await getHistogramData(newRows, newCol);
+        setAfterData(after);
+      } else {
+        setAfterData([]);
+      }
+    } finally {
+      setApplying(false);
+    }
   };
 
-  const beforeData = col ? getHistogramData(rows, col) : [];
-  const afterData = transformedRows && transformedCol && selectedTransform !== 'bin'
-    ? getHistogramData(transformedRows, transformedCol)
-    : [];
-
-  // For bin transform, show value counts
+  // For bin transform, show value counts from the already-received rows
   const binCounts = transformedRows && selectedTransform === 'bin' ? (() => {
     const counts = {};
     transformedRows.forEach((r) => {
@@ -98,8 +116,8 @@ export default function PreprocessingLab() {
               {TRANSFORMS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
           </div>
-          <button className="btn btn-primary" onClick={handleApply} disabled={!col}>
-            <RefreshCw size={14} /> Apply
+          <button className="btn btn-primary" onClick={handleApply} disabled={!col || applying}>
+            {applying ? <><div className="loading-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Applying…</> : <><RefreshCw size={14} /> Apply</>}
           </button>
         </div>
         {transformInfo && (

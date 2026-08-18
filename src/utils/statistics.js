@@ -1,56 +1,48 @@
 /**
- * Pearson correlation between two numeric arrays
+ * statistics.js — API wrappers for the Python FastAPI backend.
+ * Pearson correlation and correlation matrix now computed by Python (pandas, scipy).
+ *
+ * Original JS implementations replaced by: backend/routers/data.py
  */
-export function pearsonCorrelation(x, y) {
-  const n = x.length;
-  if (n === 0) return 0;
-  const meanX = x.reduce((a, b) => a + b, 0) / n;
-  const meanY = y.reduce((a, b) => a + b, 0) / n;
-  const num = x.reduce((acc, xi, i) => acc + (xi - meanX) * (y[i] - meanY), 0);
-  const denX = Math.sqrt(x.reduce((acc, xi) => acc + (xi - meanX) ** 2, 0));
-  const denY = Math.sqrt(y.reduce((acc, yi) => acc + (yi - meanY) ** 2, 0));
-  if (denX === 0 || denY === 0) return 0;
-  return +(num / (denX * denY)).toFixed(4);
+import { apiFetch } from './api.js';
+
+/**
+ * Compute Pearson correlation between two numeric arrays.
+ * For single pair use, sends a minimal dataset to the backend.
+ * @param {number[]} x
+ * @param {number[]} y
+ * @returns {Promise<number>} correlation coefficient in [-1, 1]
+ */
+export async function pearsonCorrelation(x, y) {
+  const rows = x.map((xi, i) => ({ __x: xi, __y: y[i] }));
+  const result = await apiFetch('/api/data/correlation', {
+    rows,
+    numericColumns: ['__x', '__y'],
+  });
+  // matrix[0][1] is the cross-correlation between __x and __y
+  return result.matrix?.[0]?.[1] ?? 0;
 }
 
 /**
- * Compute full correlation matrix for numeric columns
+ * Compute full Pearson correlation matrix for numeric columns using pandas.
+ * @param {object[]} rows
+ * @param {string[]} numericColumns
+ * @returns {Promise<number[][]>} NxN matrix
  */
-export function computeCorrelationMatrix(rows, numericColumns) {
-  const data = {};
-  numericColumns.forEach((col) => {
-    data[col] = rows.map((r) => r[col]).filter((v) => typeof v === 'number' && !isNaN(v));
-  });
-
-  const matrix = [];
-  for (const colA of numericColumns) {
-    const row = [];
-    for (const colB of numericColumns) {
-      const a = rows.map((r) => r[colA]);
-      const b = rows.map((r) => r[colB]);
-      const pairs = a.map((v, i) => [v, b[i]]).filter(([va, vb]) => typeof va === 'number' && typeof vb === 'number');
-      row.push(pearsonCorrelation(pairs.map((p) => p[0]), pairs.map((p) => p[1])));
-    }
-    matrix.push(row);
-  }
-  return matrix;
+export async function computeCorrelationMatrix(rows, numericColumns) {
+  const result = await apiFetch('/api/data/correlation', { rows, numericColumns });
+  return result.matrix;
 }
 
 /**
- * Get missing value map: array of { col, rowIndex, isMissing }
+ * Get missing value map for a sample of rows using the backend.
+ * Returns array of { col, rowIdx, isMissing }.
+ * @param {object[]} rows
+ * @param {string[]} columns
+ * @param {number} sampleSize
+ * @returns {Promise<Array<{ col: string, rowIdx: number, isMissing: boolean }>>}
  */
-export function getMissingValueMap(rows, columns, sampleSize = 100) {
-  const sampled = rows.slice(0, sampleSize);
-  const result = [];
-  sampled.forEach((row, rowIdx) => {
-    columns.forEach((col) => {
-      const v = row[col];
-      result.push({
-        col,
-        rowIdx,
-        isMissing: v === null || v === undefined || v === '',
-      });
-    });
-  });
-  return result;
+export async function getMissingValueMap(rows, columns, sampleSize = 100) {
+  const result = await apiFetch('/api/data/missing_map', { rows, columns, sampleSize });
+  return result.map;
 }

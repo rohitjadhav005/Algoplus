@@ -1,70 +1,89 @@
 /**
- * Preprocessing transforms for numeric columns
+ * transforms.js — API wrappers for the Python FastAPI backend.
+ * All preprocessing transforms now handled by Python (sklearn, numpy).
+ *
+ * Original JS implementations replaced by: backend/routers/transforms.py
  */
+import { apiFetch } from './api.js';
 
-export function normalize(values) {
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  if (max === min) return values.map(() => 0);
-  return values.map((v) => +((v - min) / (max - min)).toFixed(6));
-}
-
-export function standardize(values) {
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  const std = Math.sqrt(values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / values.length);
-  if (std === 0) return values.map(() => 0);
-  return values.map((v) => +((v - mean) / std).toFixed(6));
-}
-
-export function logTransform(values) {
-  return values.map((v) => (v > 0 ? +Math.log(v).toFixed(6) : null));
-}
-
-export function squareRootTransform(values) {
-  return values.map((v) => (v >= 0 ? +Math.sqrt(v).toFixed(6) : null));
-}
-
-export function binValues(values, bins = 5) {
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const binSize = (max - min) / bins;
-  return values.map((v) => {
-    const bin = Math.min(Math.floor((v - min) / binSize), bins - 1);
-    const lo = +(min + bin * binSize).toFixed(3);
-    const hi = +(lo + binSize).toFixed(3);
-    return `[${lo}, ${hi})`;
-  });
-}
-
-export function applyTransform(values, transform) {
-  switch (transform) {
-    case 'normalize': return normalize(values);
-    case 'standardize': return standardize(values);
-    case 'log': return logTransform(values);
-    case 'sqrt': return squareRootTransform(values);
-    case 'bin': return binValues(values);
-    default: return values;
-  }
+/**
+ * Normalize values to [0, 1] using sklearn MinMaxScaler.
+ * NOTE: For column transforms on a full dataset, prefer applyTransformToDataset().
+ * @param {number[]} values
+ * @returns {Promise<number[]>}
+ */
+export async function normalize(values) {
+  const rows = values.map((v, i) => ({ __v: v, __i: i }));
+  const result = await apiFetch('/api/transforms/apply', { rows, col: '__v', transform: 'normalize' });
+  return result.rows.map((r) => r['__v_normalize']);
 }
 
 /**
- * Apply transform to a full dataset and return new rows
+ * Standardize values (Z-score, mean=0 std=1) using sklearn StandardScaler.
+ * @param {number[]} values
+ * @returns {Promise<number[]>}
  */
-export function applyTransformToDataset(rows, col, transform) {
-  const values = rows.map((r) => r[col]);
-  const numericValues = values.map((v) => (typeof v === 'number' && !isNaN(v) ? v : null));
+export async function standardize(values) {
+  const rows = values.map((v) => ({ __v: v }));
+  const result = await apiFetch('/api/transforms/apply', { rows, col: '__v', transform: 'standardize' });
+  return result.rows.map((r) => r['__v_standardize']);
+}
 
-  if (transform === 'bin') {
-    const nums = numericValues.filter((v) => v !== null);
-    const binned = binValues(nums, 5);
-    let binIdx = 0;
-    const transformed = numericValues.map((v) => (v !== null ? binned[binIdx++] : null));
-    return rows.map((r, i) => ({ ...r, [`${col}_${transform}`]: transformed[i] }));
-  }
+/**
+ * Natural log transform (values > 0).
+ * @param {number[]} values
+ * @returns {Promise<(number|null)[]>}
+ */
+export async function logTransform(values) {
+  const rows = values.map((v) => ({ __v: v }));
+  const result = await apiFetch('/api/transforms/apply', { rows, col: '__v', transform: 'log' });
+  return result.rows.map((r) => r['__v_log']);
+}
 
-  const nums = numericValues.filter((v) => v !== null);
-  const result = applyTransform(nums, transform);
-  let resIdx = 0;
-  const transformed = numericValues.map((v) => (v !== null ? result[resIdx++] : null));
-  return rows.map((r, i) => ({ ...r, [`${col}_${transform}`]: transformed[i] }));
+/**
+ * Square-root transform (values >= 0).
+ * @param {number[]} values
+ * @returns {Promise<(number|null)[]>}
+ */
+export async function squareRootTransform(values) {
+  const rows = values.map((v) => ({ __v: v }));
+  const result = await apiFetch('/api/transforms/apply', { rows, col: '__v', transform: 'sqrt' });
+  return result.rows.map((r) => r['__v_sqrt']);
+}
+
+/**
+ * Bin values into equal-width bins.
+ * @param {number[]} values
+ * @param {number} bins
+ * @returns {Promise<string[]>}
+ */
+export async function binValues(values, bins = 5) {
+  const rows = values.map((v) => ({ __v: v }));
+  const result = await apiFetch('/api/transforms/apply', { rows, col: '__v', transform: 'bin', bins });
+  return result.rows.map((r) => r['__v_bin']);
+}
+
+/**
+ * Apply a named transform to an array of values.
+ * @param {number[]} values
+ * @param {'normalize'|'standardize'|'log'|'sqrt'|'bin'} transform
+ * @returns {Promise<any[]>}
+ */
+export async function applyTransform(values, transform) {
+  const rows = values.map((v) => ({ __v: v }));
+  const result = await apiFetch('/api/transforms/apply', { rows, col: '__v', transform });
+  return result.rows.map((r) => r[`__v_${transform}`]);
+}
+
+/**
+ * Apply a transform to a specific column in a full dataset.
+ * Returns new rows with an additional column `{col}_{transform}`.
+ * @param {object[]} rows
+ * @param {string} col
+ * @param {'normalize'|'standardize'|'log'|'sqrt'|'bin'} transform
+ * @param {number} bins  - number of bins (only used when transform='bin')
+ * @returns {Promise<{ rows: object[], newColumn: string }>}
+ */
+export async function applyTransformToDataset(rows, col, transform, bins = 5) {
+  return apiFetch('/api/transforms/apply', { rows, col, transform, bins });
 }

@@ -1,11 +1,10 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useAppContext } from '../context/AppContext';
 import FileUpload from '../components/ui/FileUpload';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line,
 } from 'recharts';
-import { parseCSV, detectColumnTypes, computeColumnStats, getHistogramData, getValueCounts } from '../utils/dataParser';
+import { parseCSV, getHistogramData, getValueCounts } from '../utils/dataParser';
 import { computeCorrelationMatrix } from '../utils/statistics';
 import {
   Database, TrendingUp, AlertCircle, Layers, Hash, Type,
@@ -28,14 +27,18 @@ export default function DatasetExplorer() {
   const handleFile = useCallback(async (file) => {
     setLoading(true);
     try {
-      const { columns, rows } = await parseCSV(file);
-      const types = detectColumnTypes(columns, rows);
-      const stats = computeColumnStats(columns, rows, types);
+      // parseCSV now calls the Python backend — returns columns, rows, columnStats, columnTypes
+      const { columns, rows, columnStats, columnTypes, rowCount } = await parseCSV(file);
+      const types = columnTypes;
+      const stats = columnStats;
       const numCols = columns.filter((c) => types[c] === 'numeric');
-      const corrMatrix = numCols.length > 1 ? computeCorrelationMatrix(rows, numCols) : [];
+      // Fetch correlation matrix from Python backend
+      const corrMatrix = numCols.length > 1
+        ? await computeCorrelationMatrix(rows, numCols)
+        : [];
       dispatch({
         type: 'SET_DATASET',
-        payload: { columns, rows, types, stats, corrMatrix, numericColumns: numCols, fileName: file.name },
+        payload: { columns, rows, types, stats, corrMatrix, numericColumns: numCols, fileName: file.name, rowCount },
       });
       setSelectedCol(columns[0]);
       setActiveTab('overview');
@@ -84,8 +87,21 @@ export default function DatasetExplorer() {
 
   const nullPctData = columns.map((c) => ({ name: c, pct: parseFloat(stats[c]?.nullPct || 0) }));
   const selectedStats = selectedCol ? stats[selectedCol] : null;
-  const histData = selectedCol && types[selectedCol] === 'numeric' ? getHistogramData(rows, selectedCol) : [];
-  const catData = selectedCol && types[selectedCol] === 'categorical' ? getValueCounts(rows, selectedCol) : [];
+
+  // Async chart data — fetched from Python backend when selected column changes
+  const [histData, setHistData] = useState([]);
+  const [catData, setCatData] = useState([]);
+
+  useEffect(() => {
+    if (!selectedCol || !rows) return;
+    if (types[selectedCol] === 'numeric') {
+      getHistogramData(rows, selectedCol).then(setHistData).catch(() => setHistData([]));
+      setCatData([]);
+    } else if (types[selectedCol] === 'categorical') {
+      getValueCounts(rows, selectedCol).then(setCatData).catch(() => setCatData([]));
+      setHistData([]);
+    }
+  }, [selectedCol, rows, types]);
 
   const getCorrelationColor = (val) => {
     const abs = Math.abs(val);

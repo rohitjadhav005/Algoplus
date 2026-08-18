@@ -1,26 +1,37 @@
+/**
+ * dataParser.js — API wrappers for the Python FastAPI backend.
+ * File reading (parseCSV, parseJSON) stays in the browser.
+ * All statistical computation now handled by Python (pandas, numpy).
+ *
+ * Original JS implementations replaced by: backend/routers/data.py
+ */
 import Papa from 'papaparse';
+import { apiFetch, apiUpload } from './api.js';
 
 /**
- * Parse a CSV file and return { columns, rows, rawData }
+ * Parse a CSV file using PapaParse (browser-side) and then send to Python
+ * backend for column type detection and statistics computation.
+ * @param {File} file
+ * @returns {Promise<{ columns, rows, rawData, columnStats, columnTypes }>}
  */
-export function parseCSV(file) {
-  return new Promise((resolve, reject) => {
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: true,
-      complete: (results) => {
-        const rows = results.data;
-        const columns = results.meta.fields || [];
-        resolve({ columns, rows, rawData: rows });
-      },
-      error: (err) => reject(err),
-    });
-  });
+export async function parseCSV(file) {
+  // Use the backend for full parsing + stats in one shot
+  const result = await apiUpload(file);
+  return {
+    columns: result.columns,
+    rows: result.rows,
+    rawData: result.rows,
+    columnStats: result.columnStats,
+    columnTypes: result.columnTypes,
+    rowCount: result.rowCount,
+  };
 }
 
 /**
- * Parse a JSON file
+ * Parse a JSON file (browser-side FileReader) and return the parsed object.
+ * For model-results JSON (y_true / y_pred), this stays browser-side.
+ * @param {File} file
+ * @returns {Promise<any>}
  */
 export function parseJSON(file) {
   return new Promise((resolve, reject) => {
@@ -39,95 +50,48 @@ export function parseJSON(file) {
 }
 
 /**
- * Auto-detect column type: 'numeric' | 'categorical' | 'datetime'
+ * Auto-detect column types using the Python backend.
+ * @param {string[]} columns
+ * @param {object[]} rows
+ * @returns {Promise<{ [col]: 'numeric'|'categorical'|'datetime' }>}
  */
-export function detectColumnTypes(columns, rows) {
-  const types = {};
-  for (const col of columns) {
-    const values = rows.map((r) => r[col]).filter((v) => v !== null && v !== undefined && v !== '');
-    const numericCount = values.filter((v) => typeof v === 'number' && !isNaN(v)).length;
-    if (numericCount / values.length > 0.8) {
-      types[col] = 'numeric';
-    } else {
-      types[col] = 'categorical';
-    }
-  }
-  return types;
+export async function detectColumnTypes(columns, rows) {
+  const result = await apiFetch('/api/data/column_stats', { columns, rows });
+  return result.columnTypes;
 }
 
 /**
- * Compute column-level stats
+ * Compute column-level statistics using the Python backend.
+ * @param {string[]} columns
+ * @param {object[]} rows
+ * @param {object} _types - ignored; backend detects types automatically
+ * @returns {Promise<{ [col]: { type, count, nullCount, nullPct, unique, min?, max?, mean?, ... } }>}
  */
-export function computeColumnStats(columns, rows, types) {
-  const stats = {};
-  for (const col of columns) {
-    const allValues = rows.map((r) => r[col]);
-    const nonNull = allValues.filter((v) => v !== null && v !== undefined && v !== '');
-    const nullCount = allValues.length - nonNull.length;
-    const uniqueValues = [...new Set(nonNull)];
-
-    stats[col] = {
-      type: types[col],
-      count: nonNull.length,
-      nullCount,
-      nullPct: ((nullCount / allValues.length) * 100).toFixed(1),
-      unique: uniqueValues.length,
-    };
-
-    if (types[col] === 'numeric') {
-      const nums = nonNull.filter((v) => typeof v === 'number');
-      if (nums.length > 0) {
-        const sorted = [...nums].sort((a, b) => a - b);
-        const sum = nums.reduce((a, b) => a + b, 0);
-        const mean = sum / nums.length;
-        const variance = nums.reduce((acc, v) => acc + (v - mean) ** 2, 0) / nums.length;
-        stats[col] = {
-          ...stats[col],
-          min: sorted[0],
-          max: sorted[sorted.length - 1],
-          mean: mean.toFixed(4),
-          median: sorted[Math.floor(sorted.length / 2)],
-          std: Math.sqrt(variance).toFixed(4),
-          q1: sorted[Math.floor(sorted.length * 0.25)],
-          q3: sorted[Math.floor(sorted.length * 0.75)],
-        };
-      }
-    }
-  }
-  return stats;
+export async function computeColumnStats(columns, rows, _types) {
+  const result = await apiFetch('/api/data/column_stats', { columns, rows });
+  return result.columnStats;
 }
 
 /**
- * Get histogram bins for a numeric column
+ * Get histogram bins for a numeric column using numpy.
+ * @param {object[]} rows
+ * @param {string} col
+ * @param {number} bins
+ * @returns {Promise<[{ x, count }]>}
  */
-export function getHistogramData(rows, col, bins = 20) {
-  const values = rows.map((r) => r[col]).filter((v) => typeof v === 'number' && !isNaN(v));
-  if (values.length === 0) return [];
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const binSize = (max - min) / bins;
-  const counts = Array(bins).fill(0);
-  values.forEach((v) => {
-    const idx = Math.min(Math.floor((v - min) / binSize), bins - 1);
-    counts[idx]++;
-  });
-  return counts.map((count, i) => ({
-    x: +(min + i * binSize + binSize / 2).toFixed(3),
-    count,
-  }));
+export async function getHistogramData(rows, col, bins = 20) {
+  const result = await apiFetch('/api/data/histogram', { rows, col, bins });
+  return result.bins;
 }
 
 /**
- * Get value counts for a categorical column
+ * Get value counts for a categorical column using pandas.
+ * @param {object[]} rows
+ * @param {string} col
+ * @param {number} topN
+ * @returns {Promise<[{ name, count }]>}
  */
-export function getValueCounts(rows, col, topN = 15) {
-  const counts = {};
-  rows.forEach((r) => {
-    const v = String(r[col] ?? 'null');
-    counts[v] = (counts[v] || 0) + 1;
-  });
-  return Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(([name, count]) => ({ name, count }));
+export async function getValueCounts(rows, col, topN = 15) {
+  const result = await apiFetch('/api/data/value_counts', { rows, col, topN });
+  return result.valueCounts;
 }
